@@ -1331,68 +1331,139 @@ u32 IWRAM_CODE Loadsavefile(TCHAR *filename)
   }
 }
 //---------------------------------------------------------------------------------
-u32 IWRAM_CODE Save_savefile(TCHAR *filename,u32 savesize)
-{
-	FIL file;
-	if(savesize==0) return 0xff;
-	u32 ret=f_open(&file, filename, FA_WRITE | FA_CREATE_ALWAYS);
-	switch(ret)
-	{
-		case FR_OK:
-		{
-			int i;
-			unsigned int written;
-			//memset(pReadCache,0xFF,0x200*4);
-			SetRampage(0x0);
-			
-			if(savesize < 0x800)
-			{
-				ReadSram(SRAMSaver,pReadCache,savesize);
-				for(i=0;i<(savesize+0x1FF)/0x200 ;i++)
-				{
-		      f_write(&file, pReadCache+0x200*i, 0x200, &written);
-		      if(written != 0x200) break;
-		    }	
-			}
-			else
-			{
-				if(savesize>64*1024)
-				{
-					ReadSram(SRAMSaver, pReadCache , 64*1024 );
-					
-					for(i=0;i<64*1024/0x800 ;i++)
-					{
-			      f_write(&file, pReadCache+0x800*i, 0x200*4, &written);
-			      if(written != 0x200*4) break;
-			    }
-			    SetRampage(0x10);
-					ReadSram(SRAMSaver, pReadCache , 64*1024 );
-					
-					for(i=0;i<64*1024/0x800 ;i++)
-					{
-			      f_write(&file, pReadCache+0x800*i, 0x200*4, &written);
-			      if(written != 0x200*4) break;
-			    }
-				}
-				else
-				{
-					ReadSram(SRAMSaver, pReadCache, savesize );
-					for(i=0;i<savesize/0x800 ;i++)
-					{
-			      f_write(&file, pReadCache+0x800*i, 0x200*4, &written);
-			      if(written != 0x200*4) break;
-			    }
-				}
-		  }
-	    
-	    f_close(&file);
+u32 IWRAM_CODE Save_savefile(TCHAR *filename, u32 savesize) {
+    FIL file;
+    if (savesize == 0) return 0xFF;  // Return error if savesize is 0
 
-	     return 1;
+    u32 ret;
+    unsigned int written;
+    SetRampage(0x0);  // Ensure SRAM access is set up correctly
+
+    // Disable interrupts to prevent other functions from interrupting
+    REG_IME = 0;  // Disable interrupts (IME = 0)
+
+    // Retry until successful file open
+    while ((ret = f_open(&file, filename, FA_WRITE | FA_CREATE_ALWAYS)) != FR_OK) {
+        // Keep retrying if the file can't be opened (possibly include a delay to avoid rapid retries)
     }
-    break;
-    default:
-			return false;
-  }
+
+    int i;
+    u8 dataBuffer[256];  // Buffer for chunked reads and writes
+    int read_count = 3;  // Default read count for smaller saves
+
+    if (savesize <= 0x8000) {
+        // For saves 8KB or smaller, read 3 times for redundancy
+        read_count = 3;
+    } else {
+        // For saves larger than 8KB, read 2 times for redundancy
+        read_count = 2;
+    }
+
+    if (savesize < 0x800) {
+        // For small saves, read directly from SRAM and write it in 256-byte chunks
+        for (i = 0; i < (savesize + 0xFF) / 0x100; i++) {
+            // Stable read: read the same byte twice until values match for each byte in the chunk
+            for (int j = 0; j < 0x100; j++) {
+                u8 byte1, byte2;
+                int read_attempts = 0;
+
+                // Read the byte with the set redundancy count
+                do {
+                    ReadSram(SRAMSaver + (i * 0x100) + j, &byte1, 1);
+                    ReadSram(SRAMSaver + (i * 0x100) + j, &byte2, 1);
+                    read_attempts++;
+                } while (byte1 != byte2 && read_attempts < read_count);  // Retry until values match or hit max attempts
+
+                dataBuffer[j] = byte1;  // Store stable byte in the buffer
+            }
+
+            // Write the stable data directly to the file in 256-byte chunks
+            do {
+                f_write(&file, dataBuffer, 0x100, &written);
+            } while (written != 0x100);  // Retry writing until 256 bytes are written
+        }
+    } else {
+        if (savesize > 64 * 1024) {
+            // For saves larger than 64KB, handle in multiple steps
+            for (i = 0; i < 64 * 1024 / 0x800; i++) {
+                // Stable read: read and write in 256-byte chunks
+                for (int j = 0; j < 0x800; j += 0x100) {
+                    for (int k = 0; k < 0x100; k++) {
+                        u8 byte1, byte2;
+                        int read_attempts = 0;
+
+                        do {
+                            ReadSram(SRAMSaver + (i * 0x800) + j + k, &byte1, 1);
+                            ReadSram(SRAMSaver + (i * 0x800) + j + k, &byte2, 1);
+                            read_attempts++;
+                        } while (byte1 != byte2 && read_attempts < read_count);  // Retry reading for redundancy
+
+                        dataBuffer[k] = byte1;  // Store stable byte in the buffer
+                    }
+
+                    // Write the stable data directly to the file
+                    do {
+                        f_write(&file, dataBuffer, 0x100, &written);
+                    } while (written != 0x100);  // Retry writing until 256 bytes are written
+                }
+            }
+
+            SetRampage(0x10);
+            for (i = 0; i < 64 * 1024 / 0x800; i++) {
+                // Stable read: read and write in 256-byte chunks (again after switching memory range)
+                for (int j = 0; j < 0x800; j += 0x100) {
+                    for (int k = 0; k < 0x100; k++) {
+                        u8 byte1, byte2;
+                        int read_attempts = 0;
+
+                        do {
+                            ReadSram(SRAMSaver + (i * 0x800) + j + k, &byte1, 1);
+                            ReadSram(SRAMSaver + (i * 0x800) + j + k, &byte2, 1);
+                            read_attempts++;
+                        } while (byte1 != byte2 && read_attempts < read_count);  // Retry reading for redundancy
+
+                        dataBuffer[k] = byte1;  // Store stable byte in the buffer
+                    }
+
+                    // Write the stable data directly to the file
+                    do {
+                        f_write(&file, dataBuffer, 0x100, &written);
+                    } while (written != 0x100);  // Retry writing until 256 bytes are written
+                }
+            }
+        } else {
+            // For smaller saves, read and write in 256-byte chunks
+            for (i = 0; i < savesize / 0x800; i++) {
+                // Stable read: read and write in 256-byte chunks
+                for (int j = 0; j < 0x800; j += 0x100) {
+                    for (int k = 0; k < 0x100; k++) {
+                        u8 byte1, byte2;
+                        int read_attempts = 0;
+
+                        do {
+                            ReadSram(SRAMSaver + (i * 0x800) + j + k, &byte1, 1);
+                            ReadSram(SRAMSaver + (i * 0x800) + j + k, &byte2, 1);
+                            read_attempts++;
+                        } while (byte1 != byte2 && read_attempts < read_count);  // Retry reading for redundancy
+
+                        dataBuffer[k] = byte1;  // Store stable byte in the buffer
+                    }
+
+                    // Write the stable data directly to the file
+                    do {
+                        f_write(&file, dataBuffer, 0x100, &written);
+                    } while (written != 0x100);  // Retry writing until 256 bytes are written
+                }
+            }
+        }
+    }
+
+    f_close(&file);  // Always close the file when done
+
+    // Re-enable interrupts after the operation
+    REG_IME = 1;  // Enable interrupts (IME = 1)
+
+    return 1;  // Return success
 }
 //---------------------------------------------------------------------------------
 u32 IWRAM_CODE LoadRTSfile(TCHAR *filename)
