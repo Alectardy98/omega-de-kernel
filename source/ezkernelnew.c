@@ -1496,45 +1496,53 @@ u32 IWRAM_CODE LoadRTSfile(TCHAR *filename)
   }
 }
 //---------------------------------------------------------------------------------
-u32 SavefileWrite(TCHAR *filename,u32 savesize)
+u32 SavefileWrite(TCHAR *filename, u32 savesize)
 {
-	FIL file;
-	if(savesize==0) return 0xff;
-	u32 ret=f_open(&file, filename, FA_WRITE | FA_CREATE_ALWAYS);
-	switch(ret)
-	{
-		case FR_OK:
-		{
-			int i;
-			unsigned int written;
-			memset(pReadCache,0xFF,0x200*4);
+    FIL file;
+    if (savesize == 0) return 0xff;
+    
+    u32 ret = f_open(&file, filename, FA_WRITE | FA_CREATE_ALWAYS);
+    switch (ret)
+    {
+        case FR_OK:
+        {
+            int i;
+            unsigned int written;
+            memset(pReadCache, 0xFF, 0x200 * 4);  // Clear the cache
 
-			if(savesize < 0x800)
-			{
-				for(i=0;i<(savesize+0x1FF)/0x200 ;i++)
-				{
-		      f_write(&file, pReadCache, 0x200, &written);
-		      if(written != 0x200) break;
-		    }	
-			}
-			else
-			{
-				for(i=0;i<(savesize+0x1FF)/0x800 ;i++)
-				{
-		      f_write(&file, pReadCache, 0x200*4, &written);
-		      if(written != 0x200*4) break;
-		    }
-		  }
-	    
-	    f_close(&file);
+            // Use smaller block sizes for writing (0x100 or 0x80 instead of 0x200 or 0x800)
+            u32 block_size = 0x100;  // Smaller block size
+            u32 total_written = 0;
 
-	     return 1;
+            // Write data in smaller blocks
+            while (total_written < savesize)
+            {
+                u32 remaining_size = savesize - total_written;
+                u32 current_block_size = (remaining_size < block_size) ? remaining_size : block_size;
+
+                f_write(&file, pReadCache + total_written, current_block_size, &written);
+
+                // Check if the entire block was written
+                if (written != current_block_size)
+                {
+                    // If not, exit early with failure
+                    f_close(&file);
+                    return 0xff;
+                }
+
+                total_written += written;  // Update the total written size
+            }
+
+            f_close(&file);
+            return 1;  // Successfully written
+        }
+        break;
+
+        default:
+            return false;
     }
-    break;
-    default:
-			return false;
-  }
 }
+
 //---------------------------------------------------------------
 u8 Check_saveMODE(u8 gamecode[])
 {
