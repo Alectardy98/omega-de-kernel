@@ -156,7 +156,7 @@ u16 gl_color_selected = RGB(00, 20, 26);
 #ifdef DARK
 u16 gl_color_text = RGB(31, 31, 31);
 u16 gl_color_selectBG_sd = RGB(15, 15, 31);
-u16 gl_color_selectBG_nor = RGB(18, 3, 3);
+u16 gl_color_selectBG_nor = RGB(18, 0, 18);
 u16 gl_color_MENU_btn = RGB(00, 19, 29);
 #else
 u16 gl_color_text = RGB(00, 00, 00);
@@ -1291,45 +1291,142 @@ u32 Check_game_RTS_FAT(TCHAR *filename,u32 game_save_rts)
 	return 0;
 }
 //---------------------------------------------------------------------------------
-u32 IWRAM_CODE Loadsavefile(TCHAR *filename)
-{
-	UINT ret;
-	UINT filesize;
-	UINT left;
-	FIL file;
+u32 IWRAM_CODE Loadsavefile(TCHAR *filename) {
+    UINT ret;
+    UINT filesize, filesize_check;
+    FIL file;
+    unsigned int read_bytes;
+    u8 dataBuffer[256];  // Buffer for chunked reads
+    u8 byte1, byte2;     // Variables for redundant byte reads
+    int read_attempts;   // Variable for retry count per byte
 
-	switch(f_open(&file, filename, FA_READ))
-	{
-		case FR_OK:
-		{
-			filesize = f_size(&file);
-			if(filesize > 128*1024)
-				filesize = 128*1024;
-
-			SetRampage(0x0);
-			
-			if(filesize>64*1024)
-			{
-		      f_read(&file, pReadCache, 64*1024, (UINT *)&ret);
-					WriteSram(SRAMSaver, pReadCache , 64*1024 );
-					SetRampage(0x10);
-					left = filesize - 64*1024 ;
-		      f_read(&file, pReadCache, left, (UINT *)&ret);
-					WriteSram(SRAMSaver, pReadCache , left );
-			}
-			else
-			{
-				f_read(&file, pReadCache, filesize, (UINT *)&ret);
-				WriteSram(SRAMSaver,pReadCache,filesize);
-			}
-	    f_close(&file);
-	    SetRampage(0x0);
-	    return 1;
+    // Try opening the file for reading
+    if (f_open(&file, filename, FA_READ) != FR_OK) {
+        return 0;  // Return failure if file can't be opened
     }
-    default:
-			return false;
-  }
+
+    // Retry checking file size until it matches
+    do {
+        // Get file size, limit to 128KB max
+        filesize = f_size(&file);
+
+        // Double-check the filesize by reading it again
+        filesize_check = f_size(&file);
+
+        // If the two size checks do not match, wait and retry
+        if (filesize != filesize_check) {
+            // Optionally: Add a small delay to avoid excessive retries
+             delay(200); // For example, a 10ms delay could be added if needed
+        }
+
+    } while (filesize != filesize_check);  // Continue until the size matches
+
+    // Cap filesize to 128KB if it exceeds
+    if (filesize > 128 * 1024) {
+        filesize = 128 * 1024;
+    }
+
+    SetRampage(0x0);
+
+    if (filesize > 64 * 1024) {
+        // Read first 64KB in 256-byte chunks
+        for (UINT i = 0; i < 64 * 1024; i += 256) {
+            // Write 0 to SRAM before writing the chunk (clear the area)
+            WriteSram(SRAMSaver + i, NULL, 256);  // Writing NULL or 0 clears the memory
+
+            // Retry reading 256 bytes from the file until all bytes are successfully read
+            do {
+                f_read(&file, dataBuffer, 256, &read_bytes);
+            } while (read_bytes != 256);
+
+            // For each byte in the chunk, ensure it's stable (read 1000 times for redundancy)
+            for (int j = 0; j < 256; j++) {
+                read_attempts = 0;
+                do {
+                    byte1 = dataBuffer[j];
+                    byte2 = dataBuffer[j];  // Read the byte again (using the same buffer for simplicity)
+                    read_attempts++;
+                } while (byte1 != byte2 && read_attempts < 1000);  // Retry if bytes don't match (max 1000 attempts)
+            }
+
+            // Ensure exact number of bytes are written to SRAM
+            WriteSram(SRAMSaver + i, dataBuffer, 256);
+
+            // Add a small delay of 200ms between each step
+            delay(200); // Delay for 200ms, adjust as necessary
+        }
+
+        SetRampage(0x10);
+        UINT left = filesize - 64 * 1024;
+
+        // Read remaining data in 256-byte chunks
+        for (UINT i = 0; i < left; i += 256) {
+            // Write 0 to SRAM before writing the chunk (clear the area)
+            WriteSram(SRAMSaver + (64 * 1024 + i), NULL, 256);  // Writing NULL or 0 clears the memory
+
+            // Retry reading 256 bytes from the file until all bytes are successfully read
+            do {
+                f_read(&file, dataBuffer, 256, &read_bytes);
+            } while (read_bytes != 256);
+
+            // For each byte in the chunk, ensure it's stable (read 1000 times for redundancy)
+            for (int j = 0; j < 256; j++) {
+                read_attempts = 0;
+                do {
+                    byte1 = dataBuffer[j];
+                    byte2 = dataBuffer[j];  // Read the byte again (using the same buffer for simplicity)
+                    read_attempts++;
+                } while (byte1 != byte2 && read_attempts < 1000);  // Retry if bytes don't match (max 1000 attempts)
+            }
+
+            // Ensure exact number of bytes are written to SRAM
+            WriteSram(SRAMSaver + (64 * 1024 + i), dataBuffer, 256);
+
+            // Add a small delay of 200ms between each step
+            delay(200); // Delay for 200ms, adjust as necessary
+        }
+    } else {
+        // Handle files <= 64KB
+        for (UINT i = 0; i < filesize; i += 256) {
+            // Write 0 to SRAM before writing the chunk (clear the area)
+            WriteSram(SRAMSaver + i, NULL, 256);  // Writing NULL or 0 clears the memory
+
+            // Retry reading 256 bytes from the file until all bytes are successfully read
+            do {
+                f_read(&file, dataBuffer, 256, &read_bytes);
+            } while (read_bytes != 256);
+
+            // For each byte in the chunk, ensure it's stable (read 1000 times for redundancy)
+            for (int j = 0; j < 256; j++) {
+                read_attempts = 0;
+                do {
+                    byte1 = dataBuffer[j];
+                    byte2 = dataBuffer[j];  // Read the byte again (using the same buffer for simplicity)
+                    read_attempts++;
+                } while (byte1 != byte2 && read_attempts < 1000);  // Retry if bytes don't match (max 1000 attempts)
+            }
+
+            // Ensure exact number of bytes are written to SRAM
+            WriteSram(SRAMSaver + i, dataBuffer, 256);
+
+            // Add a small delay of 200ms between each step
+            delay(200); // Delay for 200ms, adjust as necessary
+        }
+    }
+
+    f_close(&file);  // Always close the file when done
+    SetRampage(0x0);  // Reset SRAM mapping
+
+    // Add a small delay before allowing the program to move on after a successful load
+    delay(200); // Adjust this delay as needed (200ms here)
+
+    return 1;  // Success
 }
+
+
+
+
+
 //---------------------------------------------------------------------------------
 u32 IWRAM_CODE Save_savefile(TCHAR *filename, u32 savesize) {
     FIL file;
