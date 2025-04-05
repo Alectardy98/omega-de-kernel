@@ -1,19 +1,24 @@
 ###### FORKED FROM https://github.com/ez-flash/omega-de-kernel
 
-# SimpleLight for EZ Flash Omega Definitive Edition
-###### *If you're looking for SimpleLight for the **original** EZ Flash Omega, check here: https://github.com/Sterophonick/SimpleLight*
+# SimpleLight Fork - Overclocking Edition for EZ Flash Omega Definitive Edition.... No support is planned for the other EZ Flash Products.
+###### *If you're looking for SimpleLight lite as it was originally created, check here: [https://github.com/Sterophonick/SimpleLight](https://gbatemp.net/threads/new-theme-for-ez-flash-omega.520665/)*
 
 Hello all!
 
-I have been working on a new theme for the EZ-Flash Omega, and I call it Simple.
+WHAT IS THIS...
+This fork is intended to allow full compatibility for a crystal oscillator-modified GBA systems to function in a stable manner when saving and loading from an EZ Flash DE. Having this custom firmware is only one step. As you will need to perform the hardware modification to allow for the overclock, as well as a modified ROM file with a WAITCNT Patch.  
 
-It is a nice rounded theme with both light and dark options, and allows for many, many more file types to be used, such as Master System and ZX Spectrum ROMs to be launched, along with the ability to view bitmap images, read text documents, and play music. (shoutouts to Kuwanger for PogoShell)
+This is a fork of the Simple Kernal, which itself is a fork of the original EZ-Flash Omega Kernal. I do not have any affiliation with either team, though I greatly appreciate the work done by both of them.
 
-I completely redid all of the graphics, along with using a different font.
+I have had a few EZ flash DE flashcards, and I have found that the various revisions use diferent quality components, that may or may not be very stable with overclocking. Primarily the issue that I was running into had to do with save file loading into SRAM, and moving back into the SD card while overclocking. As you can see from the code modified here, I added a much more robust error correction method for saving and loading games to and from the SD card. Now there is error correction and a byte byte-by-byte copy method. I have tested this with a handful of different games while overclocking a full 2x and have no issues. Even if you are not planning on overclocking, this way of saving and loading into SRAM may be an improvement if you are experiencing save file corruption or deletion.
 
-It also uses the 2019-05-04 version of Goomba Color, and has a save backup feature (shoutouts to Veikkos)
+Unlike the original Simple DE, you have no option between light mode and dark mode here, I have made a new custom Pinkish colorway, that may or may not be to your liking. I did it this way because that was what was most appealing to me. If you would rather use one of the OG colorways, you can revert that part of the code to reflect the original Simple DE fork.
+
+I am also using a fork of the Newest JaGoomba Color, which I also had to modify in order to get working with save games under an overclock. The TLDR of the modifications made is that goomba color uses a compression algorithm to shrink the size of saved game files. This compression algorithm when overclocked would fail and cause save data to not read properly from SRAM. This compression algorithm has been removed, meaning that RAW save games are now being used. This has the unfortunate downside of greatly reducing or completely removing the save state function in games due to lack of space. If someone wants to add SRAM Bank switching into the goomba color source code, we could allow for the full SRAM size of the EZ flash... but as of right now, we are still limited to just one 64k bank.
 
 Hope everyone likes it!
+
+THE REST IS COPIED FROM THE ORIGINAL FORK
 
 Official forum thread:
 https://gbatemp.net/threads/new-theme-for-ez-flash-omega.520665/
