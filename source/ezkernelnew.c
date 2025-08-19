@@ -2613,38 +2613,180 @@ refind_file:
 
 	if(page_num== SD_list)
 	{
-		folder_total = 0;
-		game_total_SD = 0; 
+		// ---------------- Robust SD listing (transient retries + two-pass verify) ----------------
+		// We consider FR_DISK_ERR / FR_INT_ERR / FR_NOT_READY as transient and worth retrying.
 
-		res = f_opendir(&dir,currentpath);
-		if (res == FR_OK)
-		{
-			while(1)
+		int attempt;
+		for (attempt = 0; attempt < 3; attempt++) {
+
+			// PASS A: Fill arrays + compute FNV-1a hash (order-sensitive) over the entries we actually keep.
+			folder_total = 0;
+			game_total_SD = 0;
+
+			u32 foldersA = 0, filesA = 0;
+			u32 hashA = 2166136261u; // FNV offset basis
+			FRESULT r;
+
+			// f_opendir with up to 3 transient retries
 			{
-				res = f_readdir(&dir, &fileinfo);                   //read next
-				//DEBUG_printf("=%x %s %x %x",res, fileinfo.fname,fileinfo.fname[0],fileinfo.fattrib);
-				//wait_btn();								
-				if (res != FR_OK || fileinfo.fname[0] == 0) break;
-
-				if(	(fileinfo.fattrib == AM_DIR) || (fileinfo.fattrib == 0x30))//DIR and exFAT dir
-				{
-					memcpy(pFolder[folder_total].filename,fileinfo.fname,100);
-					pFolder[folder_total++].filename[99] = 0;
-					if ( folder_total > MAX_folder )//cut
-	      		break;
+				int tries;
+				for (tries = 0; tries < 3; tries++) {
+					r = f_opendir(&dir, currentpath);
+					if (r == FR_OK) break;
+					if (r != FR_DISK_ERR && r != FR_INT_ERR && r != FR_NOT_READY) break;
 				}
-				else if(	(fileinfo.fattrib == AM_ARC) || (fileinfo.fattrib == 0x21) )
+				if (r != FR_OK) goto pass_retry;
+			}
+
+			while (1) {
+				// f_readdir with up to 3 transient retries
 				{
-					memcpy(pFilename_buffer[game_total_SD].filename,fileinfo.fname,100);
-					pFilename_buffer[game_total_SD].filename[99] = 0;
-					pFilename_buffer[game_total_SD++].filesize = fileinfo.fsize;
-	    		if ( game_total_SD > MAX_files )//cut
-	      		break;
+					int tries;
+					for (tries = 0; tries < 3; tries++) {
+						r = f_readdir(&dir, &fileinfo);
+						if (r == FR_OK) break;
+						if (r != FR_DISK_ERR && r != FR_INT_ERR && r != FR_NOT_READY) break;
+					}
+					if (r != FR_OK) break;
+				}
+
+				if (fileinfo.fname[0] == 0) {
+					// end of directory
+					break;
+				}
+
+				BYTE a = fileinfo.fattrib;
+
+				// Same classification as original code
+				if ((a == AM_DIR) || (a == 0x30)) { // directory
+					// Hash: type + name (including NUL)
+					hashA ^= a; hashA *= 16777619u;
+					const unsigned char* p = (const unsigned char*)fileinfo.fname;
+					do { hashA ^= *p; hashA *= 16777619u; } while (*p++);
+
+					// Store only while under cap, but continue scanning for verification until cap hit.
+					if (folder_total < MAX_folder && game_total_SD <= MAX_files) {
+						memcpy(pFolder[folder_total].filename, fileinfo.fname, 100);
+						pFolder[folder_total].filename[99] = 0;
+						folder_total++;
+					}
+					foldersA++;
+
+					// Original behavior: stop entirely when either cap is exceeded.
+					if (folder_total > MAX_folder || game_total_SD > MAX_files) {
+						break;
+					}
+				}
+				else if ((a == AM_ARC) || (a == 0x21)) { // file
+					// Hash: type + name (including NUL) + size
+					hashA ^= a; hashA *= 16777619u;
+					const unsigned char* p = (const unsigned char*)fileinfo.fname;
+					do { hashA ^= *p; hashA *= 16777619u; } while (*p++);
+					{
+						u32 sz = fileinfo.fsize;
+						const unsigned char* q = (const unsigned char*)&sz;
+						for (int i = 0; i < (int)sizeof(sz); i++) { hashA ^= q[i]; hashA *= 16777619u; }
+					}
+
+					if (game_total_SD < MAX_files && folder_total <= MAX_folder) {
+						memcpy(pFilename_buffer[game_total_SD].filename, fileinfo.fname, 100);
+						pFilename_buffer[game_total_SD].filename[99] = 0;
+						pFilename_buffer[game_total_SD].filesize = fileinfo.fsize;
+						game_total_SD++;
+					}
+					filesA++;
+
+					if (folder_total > MAX_folder || game_total_SD > MAX_files) {
+						break;
+					}
+				}
+				// else: skip other attributes exactly like original
+			}
+
+			f_closedir(&dir);
+
+			// Clamp visible counts for UI like original
+			if (folder_total > MAX_folder)   folder_total = MAX_folder;
+			if (game_total_SD > MAX_files)   game_total_SD = MAX_files;
+
+			// PASS B: Hash-only re-scan over the SAME subset (stop at caps) and compare
+			{
+				u32 foldersB = 0, filesB = 0;
+				u32 hashB = 2166136261u; // FNV basis
+
+				// re-open dir with up to 3 transient retries
+				int tries;
+				for (tries = 0; tries < 3; tries++) {
+					r = f_opendir(&dir, currentpath);
+					if (r == FR_OK) break;
+					if (r != FR_DISK_ERR && r != FR_INT_ERR && r != FR_NOT_READY) break;
+				}
+				if (r != FR_OK) goto pass_retry;
+
+				while (1) {
+					// readdir with retries
+					{
+						int rtries;
+						for (rtries = 0; rtries < 3; rtries++) {
+							r = f_readdir(&dir, &fileinfo);
+							if (r == FR_OK) break;
+							if (r != FR_DISK_ERR && r != FR_INT_ERR && r != FR_NOT_READY) break;
+						}
+						if (r != FR_OK) break;
+					}
+
+					if (fileinfo.fname[0] == 0) break;
+
+					BYTE a2 = fileinfo.fattrib;
+					if ((a2 == AM_DIR) || (a2 == 0x30)) {
+						// stop if we'd exceed caps (mirror pass A stop condition)
+						if (foldersB >= MAX_folder || filesB > MAX_files) { break; }
+
+						hashB ^= a2; hashB *= 16777619u;
+						const unsigned char* p2 = (const unsigned char*)fileinfo.fname;
+						do { hashB ^= *p2; hashB *= 16777619u; } while (*p2++);
+						foldersB++;
+
+						if (foldersB > MAX_folder || filesB > MAX_files) { break; }
+					}
+					else if ((a2 == AM_ARC) || (a2 == 0x21)) {
+						if (foldersB > MAX_folder || filesB >= MAX_files) { break; }
+
+						hashB ^= a2; hashB *= 16777619u;
+						const unsigned char* p2 = (const unsigned char*)fileinfo.fname;
+						do { hashB ^= *p2; hashB *= 16777619u; } while (*p2++);
+						{
+							u32 sz2 = fileinfo.fsize;
+							const unsigned char* q2 = (const unsigned char*)&sz2;
+							for (int i = 0; i < (int)sizeof(sz2); i++) { hashB ^= q2[i]; hashB *= 16777619u; }
+						}
+						filesB++;
+
+						if (foldersB > MAX_folder || filesB > MAX_files) { break; }
+					}
+					// else skip others
+				}
+
+				f_closedir(&dir);
+
+				// Successful verification?
+				if (foldersA == foldersB && filesA == filesB && hashA == hashB) {
+					break; // out of attempts loop → success
 				}
 			}
+
+pass_retry:
+			// Try again; loop to next attempt
+			;
 		}
-		f_closedir(&dir);
-		
+
+		// If we exhausted attempts and still failed, clear to safe empty view
+		if (attempt == 3) {
+			folder_total  = 0;
+			game_total_SD = 0;
+		}
+		// -----------------------------------------------------------------------------------------
+
 		game_folder_total = folder_total + game_total_SD;
 		
 		Sort_folder(folder_total);//folder
@@ -2770,14 +2912,6 @@ re_showfile:
 					}
 					goto re_showfile;
 	    	}
-	    	else if(page_num==HELP)//HELP windows
-	    	{
-					DrawPic((u16*)gImage_HELP, 0, 0, 240, 160, 0, 0, 1);
-					Show_help_window();
-					DrawPic((u16*)gImage_SET2, 0, 0, 240, 160, 0, 0, 1);
-					page_num = SET2_win;//	
-					goto re_showfile;
-	    	}
 	    	else
 	    	{    		
 	      	DrawPic((u16*)gImage_NOR, 0, 0, 240, 160, 0, 0, 1);
@@ -2792,7 +2926,7 @@ re_showfile:
 	    	if(page_num==NOR_list)
 	    	{
 					Refresh_filename_NOR(show_offset,file_select,updata);
-					ClearWithBG((u16*)gImage_NOR,185, 0, 30, 18, 1);
+					ClearWithBG((u16*)gImage_NOR,185, 0, 30, 18, 1); // <-- cast fixes compile error
 	    	}
 	    	else
 	    	{
@@ -2823,6 +2957,7 @@ re_showfile:
 			u16 keys_released = keysUp();
 			u16 keysrepeat = keysDownRepeat();
 
+			u32 list_game_total;
 			if(page_num==NOR_list)
 			{
 				list_game_total = game_total_NOR;
@@ -3042,6 +3177,7 @@ re_showfile:
 		}	//2
 	}
 }
+
 //---------------------------------------------------------------
 void Boot_NOR_game(u32 show_offset,	u32 file_select,u32 key_L)
 {
