@@ -2529,73 +2529,45 @@ void Set_saveMODE(BYTE saveMODE)
 //---------------------------------------------------------------------------------
 // Program entry point
 //---------------------------------------------------------------------------------
-// ===== minimal includes needed here (keep your other includes as-is) =====
-#include "ff15/ff.h"
-#include "ff15/diskio.h"   // DSTATUS, STA_NOINIT, disk_initialize()
-#include "draw.h"          // DrawHZText12, ClearWithBG, DrawPic
-// ========================================================================
+// ---- safe wrapper for const strings passed to DrawHZText12 ----
+static void SafeDrawHZText12(const char* s, u16 len, u16 x, u16 y, u16 c, u8 isDrawDirect)
+{
+    char buf[96];
+    if (!s) return;
 
-// If EZcardFs & other globals are declared elsewhere, don't redeclare.
-// extern FATFS EZcardFs;
-// extern u8  *gImage_splash, *gImage_SD, *gImage_NOR, *gImage_SET, *gImage_SET2, *gImage_HELP, *gImage_NOTFOUND;
-// extern const char *gl_init_error, *gl_power_off, *gl_init_ok, *gl_Loading;
-// extern u16 gl_color_cheat_black;
-// extern ... (your existing globals)
-
-// -----------------------------------------------------------------------------
-// FatFs error string
-static const char* ff_errstr(FRESULT r){
-    switch(r){
-        case FR_OK: return "FR_OK";
-        case FR_DISK_ERR: return "FR_DISK_ERR";
-        case FR_INT_ERR: return "FR_INT_ERR";
-        case FR_NOT_READY: return "FR_NOT_READY";
-        case FR_NO_FILE: return "FR_NO_FILE";
-        case FR_NO_PATH: return "FR_NO_PATH";
-        case FR_INVALID_NAME: return "FR_INVALID_NAME";
-        case FR_DENIED: return "FR_DENIED";
-        case FR_EXIST: return "FR_EXIST";
-        case FR_INVALID_OBJECT: return "FR_INVALID_OBJECT";
-        case FR_WRITE_PROTECTED: return "FR_WRITE_PROTECTED";
-        case FR_INVALID_DRIVE: return "FR_INVALID_DRIVE";
-        case FR_NOT_ENABLED: return "FR_NOT_ENABLED";
-        case FR_NO_FILESYSTEM: return "FR_NO_FILESYSTEM";
-        case FR_MKFS_ABORTED: return "FR_MKFS_ABORTED";
-        case FR_TIMEOUT: return "FR_TIMEOUT";
-        case FR_LOCKED: return "FR_LOCKED";
-        case FR_NOT_ENOUGH_CORE: return "FR_NOT_ENOUGH_CORE";
-        case FR_TOO_MANY_OPEN_FILES: return "FR_TOO_MANY_OPEN_FILES";
-        case FR_INVALID_PARAMETER: return "FR_INVALID_PARAMETER";
-        default: return "FR_???";
+    if (len == 0) {
+        // copy until NUL or buffer end
+        size_t n = 0;
+        while (n < sizeof(buf) - 1 && s[n] != '\0') { buf[n] = s[n]; n++; }
+        buf[n] = '\0';
+        DrawHZText12(buf, 0, x, y, c, isDrawDirect);
+    } else {
+        size_t n = (len < (sizeof(buf) - 1)) ? len : (sizeof(buf) - 1);
+        for (size_t i = 0; i < n; i++) buf[i] = s[i];
+        buf[n] = '\0';
+        DrawHZText12(buf, len, x, y, c, isDrawDirect);
     }
 }
 
-// -----------------------------------------------------------------------------
-// Robust mount with warm-up & retries; draws error text on splash if failing
-static FRESULT robust_mount(void){
-    for (int i = 0; i < 6; i++) VBlankIntrWait(); // ~100ms warm-up
-
-    for (int attempt = 0; attempt < 3; attempt++){
-        DSTATUS s = disk_initialize(0);
-        if (s & STA_NOINIT){
-            for (int i=0;i<3;i++) VBlankIntrWait();
-        }
-
-        f_mount(NULL, "", 0);
-        FRESULT r = f_mount(&EZcardFs, "", 1);
-        if (r == FR_OK) return FR_OK;
-
-        ClearWithBG((u16*)gImage_splash, 0, 50, 240, 20, 1);
-        DrawHZText12("SD init:",0,2,52, gl_color_cheat_black,1);
-        DrawHZText12((char*)ff_errstr(r),0,70,52, gl_color_cheat_black,1);
-
-        for (int i=0;i<10;i++) VBlankIntrWait(); // ~167ms between attempts
-    }
-    return FR_NOT_READY;
+// VBlank-synced text draw to avoid VRAM tearing/glitches at high clocks
+static inline void SafeDrawHZText12_VSync(const char* s, u16 len, u16 x, u16 y, u16 c, u8 isDrawDirect)
+{
+    // Align to VBlank, draw, then wait again to ensure the blitter finishes
+    VBlankIntrWait();
+    SafeDrawHZText12(s, len, x, y, c, isDrawDirect);
+    VBlankIntrWait();
 }
 
-// -----------------------------------------------------------------------------
-// main()
+// Simple frame-based delay (60 FPS). 180 frames ≈ 3 seconds.
+static void wait_frames(int frames)
+{
+    while (frames-- > 0) {
+        VBlankIntrWait();
+    }
+}
+
+// ----------------------------------------------------------------
+
 int main(void) {
 
 	irqInit();
@@ -2613,80 +2585,74 @@ int main(void) {
 	u32 page_mode;
 	u32 shift;
 	u32 short_filename=0;
-	
+
 	u8 error_num;
 
 	gl_currentpage = 0x8002 ;//kernel mode
 
 	SetMode (MODE_3 | BG2_ENABLE );
-	
-	SD_Disable();	
+
+	SD_Disable();
 	Set_RTC_status(1);
 
 	//check FW
 	scanKeys();
-	// u16 keys = keysDown(); // (unused) remove or (void) it if you keep it
-	// (void)keys;
-	
+	u16 keys = keysDown();
+
 	Check_FW_update();
-	/*else if(keys & KEY_L) {
-		Check_FW_update(Current_FW_ver,Built_in_ver);
-	}*/
-		
-		
-	DrawPic((u16*)gImage_splash, 0, 0, 240, 160, 0, 0, 1);	
-	CheckLanguage();	
+
+	DrawPic((u16*)gImage_splash, 0, 0, 240, 160, 0, 0, 1);
+	CheckLanguage();
 	CheckSwitch();
 
-	// ---- robust mount instead of direct f_mount -----------------------------
-	res = robust_mount();
+	// ---- NEW: allow SD to settle 3 seconds before first init/mount ----
+	wait_frames(180); // ~3s at ~60fps
+
+	res = f_mount(&EZcardFs, "", 1);
 	if( res != FR_OK)
 	{
-		DrawHZText12(gl_init_error,0,2,20, gl_color_cheat_black,1);
-		DrawHZText12((char*)ff_errstr((FRESULT)res),0,2,33, gl_color_cheat_black,1);
-		DrawHZText12(gl_power_off,0,2,46, gl_color_cheat_black,1);
+		SafeDrawHZText12_VSync(gl_init_error,0,2,20, gl_color_cheat_black,1);
+		SafeDrawHZText12_VSync(gl_power_off,0,2,33, gl_color_cheat_black,1);
 		while(1);
 	}
 	else
 	{
-		DrawHZText12(gl_init_ok,0,2,20, gl_color_cheat_black,1);
-		DrawHZText12(gl_Loading,0,2,33, gl_color_cheat_black,1);
+		SafeDrawHZText12_VSync(gl_init_ok,0,2,20, gl_color_cheat_black,1);
+		SafeDrawHZText12_VSync(gl_Loading,0,2,33, gl_color_cheat_black,1);
 	}
-	// -------------------------------------------------------------------------
+	VBlankIntrWait();
 
-	VBlankIntrWait();	
-	
 	Check_save_flag();
 
 	f_chdir("/");
-	memset(currentpath,0x00,MAX_path_len);
+	memset(currentpath,00,MAX_path_len);
 	memset(currentpath_temp,0x00,MAX_path_len);
 	folder_select = 1;
 	memset(p_folder_select_show_offset,0x00,100);
 	memset(p_folder_select_file_select,0x00,100);
-	
+
 	res = f_getcwd(currentpath, sizeof currentpath / sizeof *currentpath);
 
-	Read_NOR_info();	
+	Read_NOR_info();
 	gl_norOffset = 0x000000;
 	game_total_NOR = GetFileListFromNor();//initialize to prevent direct writes to NOR without page turning
 	if(game_total_NOR==0)
 	{
-		memset(pNorFS,0x00,sizeof(FM_NOR_FS)*MAX_NOR);
+		memset(pNorFS,00,sizeof(FM_NOR_FS)*MAX_NOR);
 		Save_NOR_info((u16*)pNorFS,sizeof(FM_NOR_FS)*MAX_NOR);
 	}
 
 refind_file:
-	
 
 	if(page_num== SD_list)
 	{
 		// ---------------- Robust SD listing (transient retries + two-pass verify) ----------------
+		// We consider FR_DISK_ERR / FR_INT_ERR / FR_NOT_READY as transient and worth retrying.
 
 		int attempt;
 		for (attempt = 0; attempt < 3; attempt++) {
 
-			// PASS A: Fill arrays + FNV-1a hash over kept entries (order-sensitive)
+			// PASS A: Fill arrays + compute FNV-1a hash (order-sensitive) over the entries we actually keep.
 			folder_total = 0;
 			game_total_SD = 0;
 
@@ -2718,16 +2684,20 @@ refind_file:
 				}
 
 				if (fileinfo.fname[0] == 0) {
-					break; // end of directory
+					// end of directory
+					break;
 				}
 
 				BYTE a = fileinfo.fattrib;
 
+				// Same classification as original code
 				if ((a == AM_DIR) || (a == 0x30)) { // directory
+					// Hash: type + name (including NUL)
 					hashA ^= a; hashA *= 16777619u;
 					const unsigned char* p = (const unsigned char*)fileinfo.fname;
 					do { hashA ^= *p; hashA *= 16777619u; } while (*p++);
 
+					// Store only while under cap, but continue scanning for verification until cap hit.
 					if (folder_total < MAX_folder && game_total_SD <= MAX_files) {
 						memcpy(pFolder[folder_total].filename, fileinfo.fname, 100);
 						pFolder[folder_total].filename[99] = 0;
@@ -2735,11 +2705,13 @@ refind_file:
 					}
 					foldersA++;
 
+					// Original behavior: stop entirely when either cap is exceeded.
 					if (folder_total > MAX_folder || game_total_SD > MAX_files) {
 						break;
 					}
 				}
 				else if ((a == AM_ARC) || (a == 0x21)) { // file
+					// Hash: type + name (including NUL) + size
 					hashA ^= a; hashA *= 16777619u;
 					const unsigned char* p = (const unsigned char*)fileinfo.fname;
 					do { hashA ^= *p; hashA *= 16777619u; } while (*p++);
@@ -2752,7 +2724,8 @@ refind_file:
 					if (game_total_SD < MAX_files && folder_total <= MAX_folder) {
 						memcpy(pFilename_buffer[game_total_SD].filename, fileinfo.fname, 100);
 						pFilename_buffer[game_total_SD].filename[99] = 0;
-						pFilename_buffer[game_total_SD++].filesize = fileinfo.fsize;
+						pFilename_buffer[game_total_SD].filesize = fileinfo.fsize;
+						game_total_SD++;
 					}
 					filesA++;
 
@@ -2760,19 +2733,21 @@ refind_file:
 						break;
 					}
 				}
-				// else: skip other attributes
+				// else: skip other attributes exactly like original
 			}
 
 			f_closedir(&dir);
 
+			// Clamp visible counts for UI like original
 			if (folder_total > MAX_folder)   folder_total = MAX_folder;
 			if (game_total_SD > MAX_files)   game_total_SD = MAX_files;
 
-			// PASS B: Hash-only re-scan (mirror stop-at-caps)
+			// PASS B: Hash-only re-scan over the SAME subset (stop at caps) and compare
 			{
 				u32 foldersB = 0, filesB = 0;
-				u32 hashB = 2166136261u;
+				u32 hashB = 2166136261u; // FNV basis
 
+				// re-open dir with up to 3 transient retries
 				int tries;
 				for (tries = 0; tries < 3; tries++) {
 					r = f_opendir(&dir, currentpath);
@@ -2782,17 +2757,22 @@ refind_file:
 				if (r != FR_OK) goto pass_retry;
 
 				while (1) {
-					int rtries;
-					for (rtries = 0; rtries < 3; rtries++) {
-						r = f_readdir(&dir, &fileinfo);
-						if (r == FR_OK) break;
-						if (r != FR_DISK_ERR && r != FR_INT_ERR && r != FR_NOT_READY) break;
+					// readdir with retries
+					{
+						int rtries;
+						for (rtries = 0; rtries < 3; rtries++) {
+							r = f_readdir(&dir, &fileinfo);
+							if (r == FR_OK) break;
+							if (r != FR_DISK_ERR && r != FR_INT_ERR && r != FR_NOT_READY) break;
+						}
+						if (r != FR_OK) break;
 					}
-					if (r != FR_OK) break;
+
 					if (fileinfo.fname[0] == 0) break;
 
 					BYTE a2 = fileinfo.fattrib;
 					if ((a2 == AM_DIR) || (a2 == 0x30)) {
+						// stop if we'd exceed caps (mirror pass A stop condition)
 						if (foldersB >= MAX_folder || filesB > MAX_files) { break; }
 
 						hashB ^= a2; hashB *= 16777619u;
@@ -2817,12 +2797,14 @@ refind_file:
 
 						if (foldersB > MAX_folder || filesB > MAX_files) { break; }
 					}
+					// else skip others
 				}
 
 				f_closedir(&dir);
 
+				// Successful verification?
 				if (foldersA == foldersB && filesA == filesB && hashA == hashB) {
-					break; // success
+					break; // out of attempts loop → success
 				}
 			}
 
@@ -2830,6 +2812,7 @@ pass_retry:
 			; // next attempt
 		}
 
+		// If we exhausted attempts and still failed, clear to safe empty view
 		if (attempt == 3) {
 			folder_total  = 0;
 			game_total_SD = 0;
@@ -2837,115 +2820,101 @@ pass_retry:
 		// -----------------------------------------------------------------------------------------
 
 		game_folder_total = folder_total + game_total_SD;
-		
+
 		Sort_folder(folder_total);//folder
 		Sort_file(game_total_SD);//file
-  }
-  else
-  {
-  	Read_NOR_info();
- 		gl_norOffset = 0x000000;
+	}
+	else
+	{
+		Read_NOR_info();
+		gl_norOffset = 0x000000;
 		game_total_NOR = GetFileListFromNor();
-  }
-  
-  if(folder_select){
+	}
+
+	if(folder_select){
 		file_select = p_folder_select_file_select[folder_select];
 		show_offset = p_folder_select_show_offset[folder_select];
-  }
-  else{	
+	}
+	else{
 		file_select = 0;
 		show_offset = 0;
 	}
 	continue_MENU = 0;
-	
+
 	u32 haveThumbnail;
 	u32 is_GBA_old=0;
 	u32 is_GBA;
-	
+
 	u32 play_re;
 	play_re = 0xBB;
 //NOR_list:
 //SD_list:
 re_showfile:
-	
+
 	shift =0;
 	page_mode=0;
-  updata=1;
-  u32 key_L=0;
+	updata=1;
+	u32 key_L=0;
 	setRepeat(5,1);
-	
+
 	if(page_num==SD_list)
 	{
-		DrawPic((u16*)gImage_SD, 0, 0, 240, 160, 0, 0, 1);	
+		DrawPic((u16*)gImage_SD, 0, 0, 240, 160, 0, 0, 1);
 	}
 	while(1)
 	{
 		while(1)//2
 		{
 			VBlankIntrWait();
-			VBlankIntrWait();			
+			VBlankIntrWait();
 			if((shift==0) || (gl_show_Thumbnail==0)){
-				short_filename = 0;				
+				short_filename = 0;
 			}
 			if(shift==0){
 				dwName =0;
-			}			
+			}
 			shift++;
-			
+
 			haveThumbnail = 0;
 			is_GBA = 0;
-			
+
 			if(updata && gl_show_Thumbnail)
 			{
-				// SAFE: only set filename when cursor is on a file and in bounds
-				TCHAR *pfilename_pic = NULL;
-				
+				TCHAR *pfilename_pic;
+
 				if(page_num==SD_list){
-					u32 idx = show_offset + file_select;
-					if (idx >= folder_total) {
-						u32 fidx = idx - folder_total;
-						if (fidx < game_total_SD) {
-							pfilename_pic = pFilename_buffer[fidx].filename;
-						}
-					}
+					pfilename_pic = pFilename_buffer[show_offset+file_select-folder_total].filename;
 				}
 				else{
-					u32 idx = show_offset + file_select;
-					if (idx < game_total_NOR) {
-						pfilename_pic = pNorFS[idx].filename;
+					pfilename_pic = pNorFS[show_offset+file_select].filename;
+				}
+
+				u32 strlengba = strlen(pfilename_pic) ;
+				if(!strcasecmp(&(pfilename_pic[strlengba-3]), "gba"))
+				{
+					is_GBA = 1;
+					haveThumbnail = Load_Thumbnail(pfilename_pic);
+					short_filename = 1;
+				}
+				else{
+					if((is_GBA_old==1) && (is_GBA==0)){
+						updata = 1;
 					}
 				}
 
-				if (pfilename_pic) {
-					u32 strlengba = strlen(pfilename_pic);
-					if (strlengba >= 3 && !strcasecmp(&(pfilename_pic[strlengba-3]), "gba"))
-					{
-						is_GBA = 1;		
-						haveThumbnail = Load_Thumbnail(pfilename_pic);	
-						short_filename = 1;			
-					}
-					else{
-						if((is_GBA_old==1) && (is_GBA==0)){
-							updata = 1;
-						}
-					}
-				} else {
-					is_GBA = 0;
-					haveThumbnail = 0;
-				}
-				
 				is_GBA_old = is_GBA;
 			}
-	    if(updata==1){//reshow all
-	    	if(page_num==SD_list)
-	    	{
-	    		ClearWithBG((u16*)gImage_SD,0, 0, 90, 20, 1);  //  		
-	    		ClearWithBG((u16*)gImage_SD,185+6, 3, 6*3, 16, 1);//Show_game_num
-	    		ClearWithBG((u16*)gImage_SD,0, 20, 240, 160-20, 1);
-	    		Show_ICON_filename_SD(show_offset,file_select,gl_show_Thumbnail&&is_GBA);
-	    	}
-	    	else if(page_num==SET_win)//set windows
-	    	{
+			if(updata==1){//reshow all
+				if(page_num==SD_list)
+				{
+					ClearWithBG((u16*)gImage_SD,0, 0, 90, 20, 1);
+					ClearWithBG((u16*)gImage_SD,185+6, 3, 6*3, 16, 1);//Show_game_num
+					ClearWithBG((u16*)gImage_SD,0, 20, 240, 160-20, 1);
+					Show_ICON_filename_SD(show_offset,file_select,gl_show_Thumbnail&&is_GBA);
+
+				}
+				else if(page_num==SET_win)//set windows
+				{
 					DrawPic((u16*)gImage_SET, 0, 0, 240, 160, 0, 0, 1);
 					res =Setting_window();
 					if(res==0){
@@ -2957,9 +2926,9 @@ re_showfile:
 						page_num = SET2_win;//
 					}
 					goto re_showfile;
-	    	}
-	    	else if(page_num==SET2_win)//set2 windows
-	    	{
+				}
+				else if(page_num==SET2_win)//set2 windows
+				{
 					DrawPic((u16*)gImage_SET2, 0, 0, 240, 160, 0, 0, 1);
 					res =Setting_window2();
 					if(res==0){
@@ -2971,35 +2940,43 @@ re_showfile:
 						page_num = HELP;//HELP
 					}
 					goto re_showfile;
-	    	}
-	    	else
-	    	{    		
-	      	DrawPic((u16*)gImage_NOR, 0, 0, 240, 160, 0, 0, 1);
-					Show_ICON_filename_NOR(show_offset,file_select);			    		
-	    	}
-	    	Show_game_num(file_select+show_offset+1,page_num);
-	  	}
-	  	else if(updata >1){
-	    	if(page_num==NOR_list)
-	    	{
+				}
+				else if(page_num==HELP)//HELP windows
+				{
+					DrawPic((u16*)gImage_HELP, 0, 0, 240, 160, 0, 0, 1);
+					Show_help_window();
+					DrawPic((u16*)gImage_SET2, 0, 0, 240, 160, 0, 0, 1);
+					page_num = SET2_win;//
+					goto re_showfile;
+				}
+				else
+				{
+					DrawPic((u16*)gImage_NOR, 0, 0, 240, 160, 0, 0, 1);
+					Show_ICON_filename_NOR(show_offset,file_select);
+				}
+				Show_game_num(file_select+show_offset+1,page_num);
+			}
+			else if(updata >1){
+				if(page_num==NOR_list)
+				{
 					Refresh_filename_NOR(show_offset,file_select,updata);
-					ClearWithBG((u16*)gImage_NOR,185, 0, 30, 18, 1); // cast
-	    	}
-	    	else
-	    	{
-	    		Refresh_filename(show_offset,file_select,updata,gl_show_Thumbnail&&is_GBA);
-	    		ClearWithBG((u16*)gImage_SD,185, 0, 30, 18, 1);
-	    	}
-	    	Show_game_num(file_select+show_offset+1,page_num );
-	  	}
-	  	
-	  	if( updata && gl_show_Thumbnail && is_GBA && (page_num==SD_list) )
+					ClearWithBG((u16*)gImage_NOR,185, 0, 30, 18, 1); // cast fixes prior compile error
+				}
+				else
+				{
+					Refresh_filename(show_offset,file_select,updata,gl_show_Thumbnail&&is_GBA);
+					ClearWithBG((u16*)gImage_SD,185, 0, 30, 18, 1);
+				}
+				Show_game_num(file_select+show_offset+1,page_num );
+			}
+
+			if( updata && gl_show_Thumbnail && is_GBA && (page_num==SD_list) )
 			{
-	  		if(haveThumbnail){				
-	  			DrawPic((u16*)(pReadCache+0x10036), 120, 80, 120, 80, 0, 0, 1);//show game pic				
+				if(haveThumbnail){
+					DrawPic((u16*)(pReadCache+0x10036), 120, 80, 120, 80, 0, 0, 1);//show game pic
 				}
 				else{
-					DrawPic((u16*)(gImage_NOTFOUND), 120, 80, 120, 80, 0, 0, 1);//show game pic	
+					DrawPic((u16*)(gImage_NOTFOUND), 120, 80, 120, 80, 0, 0, 1);//show game pic
 				}
 			}
 			if(continue_MENU) break;
@@ -3007,8 +2984,8 @@ re_showfile:
 				if(game_folder_total)
 					Filename_loop(shift,show_offset,file_select,short_filename);
 			}
-				
-	    updata=0;
+
+			updata=0;
 			scanKeys();
 			u16 keysdown  = keysDown();
 			u16 keys_released = keysUp();
@@ -3026,15 +3003,15 @@ re_showfile:
 
 			if (keysrepeat  & KEY_DOWN) {
 				if (file_select + show_offset+1 < (list_game_total )) {
-	        if ( file_select > 8 ){
-	          if ( file_select == 9 ) {
-	            show_offset++;
-	            updata=1;
-	          }
-	        }else{
-	          file_select++;
-	          updata=2;
-	        }
+					if ( file_select > 8 ){
+						if ( file_select == 9 ) {
+							show_offset++;
+							updata=1;
+						}
+					}else{
+						file_select++;
+						updata=2;
+					}
 					shift = 0;
 				}
 			}
@@ -3053,122 +3030,122 @@ re_showfile:
 			}
 			else if(keysrepeat & KEY_LEFT)
 			{
-		    if ( show_offset )
-		    {
-		      if ( show_offset > 9 )
-		        show_offset -= 10;
-		      else
-		        show_offset = 0;
+				if ( show_offset )
+				{
+					if ( show_offset > 9 )
+						show_offset -= 10;
+					else
+						show_offset = 0;
 
-		      updata=1;
-		    }
-		    else{
-		    	if(file_select){
-		    		file_select=0;
-		    		updata=1;
-		   	 	}
-		    }
-		    shift = 0;
+					updata=1;
+				}
+				else{
+					if(file_select){
+						file_select=0;
+						updata=1;
+					}
+				}
+				shift = 0;
 			}
 			else if(keysrepeat & KEY_RIGHT)
 			{
-	      if ( show_offset + 10 < list_game_total )
-	      {
-	        if ( show_offset + 20 <= list_game_total )
-	          show_offset += 10;
-	        else
-	          show_offset = list_game_total - 10;
+				if ( show_offset + 10 < list_game_total )
+				{
+					if ( show_offset + 20 <= list_game_total )
+						show_offset += 10;
+					else
+						show_offset = list_game_total - 10;
 
 					updata=1;
-	      }
-	      shift = 0;
+				}
+				shift = 0;
 			}
 			else if(keysdown & KEY_L)
 			{
 				key_L = 1;
 				if(page_num)
 				{
-	      	file_select = 0;
-	      	show_offset = 0;
-	      	updata=1;
-	      	DrawPic((u16*)gImage_SD, 0, 0, 240, 160, 0, 0, 1);
-	      	folder_select=1;
-	    	}
-				page_num = SD_list;	
-				shift = 0;			
+					file_select = 0;
+					show_offset = 0;
+					updata=1;
+					DrawPic((u16*)gImage_SD, 0, 0, 240, 160, 0, 0, 1);
+					folder_select=1;
+				}
+				page_num = SD_list;
+				shift = 0;
 			}
 			else if(keys_released & KEY_L)
 			{
 				key_L = 0;
 			}
 			else if(keysdown & KEY_R)
-			{			
-	      if(page_num==HELP){continue;}
+			{
+				if(page_num==HELP){continue;}
 				page_num ++;
 				if(page_num==NOR_list)DrawPic((u16*)gImage_NOR, 0, 0, 240, 160, 0, 0, 1);
 				updata=1;
 				folder_select=0;
 				shift = 0;
 				goto refind_file;
-			}   
+			}
 			else if(keysdown & KEY_B)//return
 			{
 				if(page_num == SD_list)
 				{
-	   			if(strcmp(currentpath,"/") !=0 ){		
-		    		dmaCopy(currentpath, currentpath_temp, MAX_path_len);
-		    		TCHAR *p=strrchr(currentpath_temp, '/');
-		    		memset(currentpath,0x00,MAX_path_len);
-		    		strncpy(currentpath, currentpath_temp, p-currentpath_temp);
-		    		if(currentpath[0]==0) currentpath[0]='/';
-		    		
+					if(strcmp(currentpath,"/") !=0 ){
+						dmaCopy(currentpath, currentpath_temp, MAX_path_len);
+						TCHAR *p=strrchr(currentpath_temp, '/');
+						memset(currentpath,0x00,MAX_path_len);
+						strncpy(currentpath, currentpath_temp, p-currentpath_temp);
+						if(currentpath[0]==0) currentpath[0]='/';
+
 						res=f_chdir(currentpath);
 						if(res != FR_OK){
 							error_num = 10;
 							Show_error_num(error_num);
 							goto re_showfile;
-						}						
-						
+						}
+
 						p_folder_select_show_offset[folder_select] = 0;//clean
 						p_folder_select_file_select[folder_select] = 0;//clean
 						if(folder_select){
 							folder_select--;
-						}												
-				    goto refind_file;
-			    }
-		  	}
+						}
+						goto refind_file;
+					}
+				}
 			}
 			else if(keysdown & KEY_SELECT)
 			{
 				gl_show_Thumbnail = !gl_show_Thumbnail;
 				save_set_info_SELECT();
 				updata=1;
-			}	
+			}
 			else if(keysdown & KEY_A)
 			{
-				if(page_num==SD_list){	
-		      if( show_offset+file_select <  folder_total)
-		      {	   				
-	   				if(strcmp(currentpath,"/") !=0){	
-	   					sprintf(currentpath,"%s%s",currentpath,"/");
+				if(page_num==SD_list){
+					if( show_offset+file_select <  folder_total)
+					{
+						if(strcmp(currentpath,"/") !=0){
+							sprintf(currentpath,"%s%s",currentpath,"/");
 						}
-		      	sprintf(currentpath,"%s%s",currentpath,pFolder[show_offset+file_select].filename);
-		      	
+						sprintf(currentpath,"%s%s",currentpath,pFolder[show_offset+file_select].filename);
+
 						res=f_chdir(currentpath);
 						if(res != FR_OK){
 							error_num = 0;
 							Show_error_num(error_num);
 							goto re_showfile;
-						}	
-											
+						}
+
 						p_folder_select_show_offset[folder_select] = show_offset;
 						p_folder_select_file_select[folder_select] = file_select;
 						folder_select++;
 
-			      goto refind_file;
-			    }
-		      else{   //SD_list file
-		      	res = SD_list_MENU(show_offset,file_select,play_re);
+						goto refind_file;
+					}
+					else{   //SD_list file
+						res = SD_list_MENU(show_offset,file_select,play_re);
 						if(res){
 							if(res==2){
 								page_num = NOR_list;
@@ -3177,7 +3154,7 @@ re_showfile:
 						}
 						else{
 							goto re_showfile;
-						} 
+						}
 					}
 				}
 				else{   //NOR gba file
@@ -3188,29 +3165,29 @@ re_showfile:
 						}
 						else{
 							goto re_showfile;
-						} 
+						}
 					}
-				} 
-					
-			}		
-			else if(keysdown & (KEY_START)  ) 
+				}
+
+			}
+			else if(keysdown & (KEY_START)  )
 			{
-				if(page_num==SD_list){//only work on sd list								
+				if(page_num==SD_list){//only work on sd list
 					if(key_L)
 					{
 						if(show_offset+file_select >= folder_total){
 							SD_list_L_START(show_offset,file_select,folder_total);
-							goto refind_file;	
-						}				
+							goto refind_file;
+						}
 					}
-					else{//only START //Recently played							
+					else{//only START //Recently played
 						play_re=show_recently_play();
 						if(play_re==0xBB){
 							goto refind_file;//KEY B
 						}
 						else{
 							page_mode = 0x1;
-			      	res = SD_list_MENU(show_offset,file_select,play_re);
+							res = SD_list_MENU(show_offset,file_select,play_re);
 							if(res){
 								if(res==2){
 									page_num = NOR_list;
@@ -3219,12 +3196,12 @@ re_showfile:
 							}
 							else{
 								goto re_showfile;
-							} 
+							}
 						}
 					}
 				}
 			}
-				
+
 			ShowTime(page_num,page_mode);
 		}	//2
 	}
